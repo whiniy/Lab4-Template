@@ -162,7 +162,7 @@ class MDPAgent(UncertainAgent):
             new_prob = likelihood * prior
             
             # store the updated probability for this location in the new distribution
-            new_estimate.set_probability(loc, new_prob)
+            new_estimate.update_probability(loc, new_prob)
 
         # normalize the new distribution so that it sums to 1
         new_estimate.renormalize()
