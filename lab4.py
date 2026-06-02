@@ -51,20 +51,26 @@ class MDP:
         Given a location distribution, calculate the new distribution that is a result of taking the given action.
         The easiest way to do this will involve sampling.
         """
-        # create empty counter for locations
+
+        # Create empty counter for resulting locations
         location_counts = LocationCounts(self.game_state.grid_size)
-        # repeat sampling for 1000 iterations 
+
+        # Sample many possible current locations
         for _ in range(1000):
-            # get possible location from source distribution
+
+            # Sample where the wizard might currently be
             current_location = source.sample()
-            # use transition_model to see where wizard could end up if it takes the action 
-            transition_distribution = self.transition_model(current_location, action)
-            # sample new location from transition model
-            new_location = transition_distribution.sample()
-            # add count to new location in location counts
+
+            # Get possible locations after taking this action from that sampled location
+            result_distribution = self.transition_model(current_location, action)
+
+            # Sample one resulting location
+            new_location = result_distribution.sample()
+
+            # Count that resulting location
             location_counts.add_count(new_location)
-        
-        # convert location counts to distribution and return
+
+        # Convert counts into a normalized probability distribution
         return location_counts.normalize()
 
 
@@ -89,21 +95,37 @@ class LocationValues:
         if len(self.value_grid) != rows or len(self.value_grid[0]) != cols:
             self.value_grid = [[0.0 for _ in range(cols)] for _ in range(rows)]
 
-        # New grid for updated values
+        # Create a new grid for updated values
         next_value_grid = [[0.0 for _ in range(cols)] for _ in range(rows)]
 
-        # Go through every location
+        # Go through every location on the map
         for row in range(rows):
             for col in range(cols):
-                location = Location(row, col)
 
-                # Create a state with the wizard at this location
+                location = Location(row, col)
+                current_tile = self.mdp.game_state.tile_grid[row][col]
+
+                # Walls are not valid places to stand, so leave their value as 0
+                if not isinstance(current_tile, (EmptyTile, Crystal, Portal, Lava)):
+                    next_value_grid[row][col] = 0
+                    continue
+
+                # Terminal tile values
+                if isinstance(current_tile, Lava):
+                    next_value_grid[row][col] = self.mdp.death_reward
+                    continue
+
+                if isinstance(current_tile, Portal):
+                    next_value_grid[row][col] = self.mdp.escape_reward
+                    continue
+
+                # Create a game state with the wizard at this location
                 source_state = self.mdp.game_state.replace_active_entity_location(location)
 
-                # Get actual successor states, including victory/defeat info
+                # Get actual successor states from this location
                 successors = GameTransitions.get_successors(source_state)
 
-                # If no successors, leave value as 0
+                # If there are no successors, keep value as 0
                 if len(successors) == 0:
                     next_value_grid[row][col] = 0
                     continue
@@ -111,18 +133,19 @@ class LocationValues:
                 actions = [a for a, _ in successors]
                 action_values = []
 
-                # Try each possible action
-                for action in WizardMoves:
+                # Try movement actions only; do not intentionally choose STAY
+                for action in [WizardMoves.UP, WizardMoves.DOWN, WizardMoves.RIGHT, WizardMoves.LEFT]:
 
-                    # If action is invalid, transition_model treats it like STAY
+                    # If this action is invalid, the game treats it like STAY
                     action_to_use = action
                     if action not in actions:
                         action_to_use = WizardMoves.STAY
 
-                    # Matches transition_model weighting
+                    # This matches the weighting logic from transition_model
                     total_weight = 2 * len(actions)
                     expected_value = 0
 
+                    # Look at every possible successor
                     for successor_action, successor_state in successors:
 
                         # Intended action gets extra probability weight
@@ -133,27 +156,33 @@ class LocationValues:
 
                         probability = weight / total_weight
 
-                        # IMPORTANT: handle terminal states directly
+                        # Handle terminal states directly
                         if successor_state.defeat:
                             reward = self.mdp.death_reward
                             future_value = 0
+
                         elif successor_state.victory:
                             reward = self.mdp.escape_reward
                             future_value = 0
+
                         else:
                             reward = self.mdp.living_reward
                             next_loc = successor_state.active_entity_location
                             future_value = self.value_grid[next_loc.row][next_loc.col]
 
+                        # Bellman update
                         expected_value += probability * (
                             reward + self.mdp.discount * future_value
                         )
 
                     action_values.append(expected_value)
 
+                # Store the best action value for this location
                 next_value_grid[row][col] = max(action_values)
 
+        # Save updated values
         self.value_grid = next_value_grid
+
         return next_value_grid
 
 
@@ -190,29 +219,45 @@ class MDPAgent(UncertainAgent):
         Use these to calculate the new belief.
         """
 
-        #We need to update our belief for all possible locations. So lets start by creating a new distribution
+        # Start with a new uniform distribution over valid empty locations
         new_estimate = LocationDistribution.from_game_state_uniform(self.mdp.game_state)
 
-        #The new distribution should be set for each location
-        # P(Loc | Obs) = P(Obs | Loc) * P(Loc)
-        for loc in new_estimate.locations():
-            # get old probability that wizard is at this location before using the new observation
+        # Save locations as a list so we can safely update probabilities while looping
+        possible_locations = list(new_estimate.locations())
+
+        total_probability = 0
+
+        # P(Loc | Obs) is proportional to P(Obs | Loc) * P(Loc)
+        for loc in possible_locations:
+
+            # Old belief probability
             prior = self.current_position_estimate.probability(loc)
-            
-            # get likelihood of the observation given that the wizard is at this location
+
+            # How likely the observation is from this location
             likelihood = self.observation_likelihood(observation, loc)
-            
-            # Bayes' rule
-            # new belief is proportional to old belief times likelihood of the observation
+
+            # Bayes rule
             new_prob = likelihood * prior
-            
-            # store the updated probability for this location in the new distribution
+
+            # Store updated probability
             new_estimate.update_probability(loc, new_prob)
 
-        # normalize the new distribution so that it sums to 1
+            # Track total probability before normalization
+            total_probability += new_prob
+
+        # If all probabilities became 0, fall back to using only the observation likelihood
+        if total_probability == 0:
+            new_estimate = LocationDistribution.from_game_state_uniform(self.mdp.game_state)
+            possible_locations = list(new_estimate.locations())
+
+            for loc in possible_locations:
+                likelihood = self.observation_likelihood(observation, loc)
+                new_estimate.update_probability(loc, likelihood)
+
+        # Normalize so probabilities sum to 1
         new_estimate.renormalize()
-        
-        # replace old belief with new belief
+
+        # Save updated belief
         self.current_position_estimate = new_estimate
 
     def react(self, observation: Observation) -> GameAction:
@@ -235,17 +280,25 @@ class MDPAgent(UncertainAgent):
         self.update_belief(observation)
 
         best_action = None
-        best_value = float("-inf")
+        best_score = float("-inf")
 
-        # Try every action
-        for action in WizardMoves:
+        portal_loc = self.mdp.game_state.get_all_tile_locations(Portal)[0]
+
+        # Try movement actions only; do not intentionally choose STAY
+        for action in [WizardMoves.UP, WizardMoves.DOWN, WizardMoves.RIGHT, WizardMoves.LEFT]:
+
             expected_value = 0
+            expected_distance = 0
 
-            # Consider every location the wizard might be at
+            # Consider every location the wizard might currently be at
             for curr_loc in self.current_position_estimate.locations():
+
                 current_prob = self.current_position_estimate.probability(curr_loc)
 
+                # Create possible current state
                 source_state = self.mdp.game_state.replace_active_entity_location(curr_loc)
+
+                # Get actual successor states
                 successors = GameTransitions.get_successors(source_state)
 
                 if len(successors) == 0:
@@ -253,16 +306,17 @@ class MDPAgent(UncertainAgent):
 
                 actions = [a for a, _ in successors]
 
-                # If action is invalid, transition_model treats it like STAY
+                # If action is invalid, the game treats it like STAY
                 action_to_use = action
                 if action not in actions:
                     action_to_use = WizardMoves.STAY
 
-                # Same probability logic as transition_model
+                # Match transition_model probability weighting
                 total_weight = 2 * len(actions)
 
                 for successor_action, successor_state in successors:
 
+                    # Intended action gets extra weight
                     if successor_action == action_to_use:
                         weight = len(actions) + 1
                     else:
@@ -270,29 +324,45 @@ class MDPAgent(UncertainAgent):
 
                     next_prob = weight / total_weight
 
-                    # IMPORTANT: handle lava/portal directly
+                    # Terminal defeat
                     if successor_state.defeat:
                         reward = self.mdp.death_reward
                         future_value = 0
+                        distance_to_portal = 999
+
+                    # Terminal victory
                     elif successor_state.victory:
                         reward = self.mdp.escape_reward
                         future_value = 0
+                        distance_to_portal = 0
+
+                    # Normal movement
                     else:
                         reward = self.mdp.living_reward
                         next_loc = successor_state.active_entity_location
                         future_value = self.values.value_grid[next_loc.row][next_loc.col]
+                        distance_to_portal = abs(next_loc.row - portal_loc.row) + abs(next_loc.col - portal_loc.col)
 
+                    # Expected Bellman value
                     expected_value += current_prob * next_prob * (
                         reward + self.mdp.discount * future_value
                     )
 
-            if expected_value > best_value:
-                best_value = expected_value
+                    # Tiny tie-breaker: prefer being closer to portal if values are tied
+                    expected_distance += current_prob * next_prob * distance_to_portal
+
+            # Score mostly uses expected value, with tiny preference for progress
+            score = expected_value - (0.000001 * expected_distance)
+
+            if score > best_score:
+                best_score = score
                 best_action = action
 
-        action = best_action
+        # Safety fallback
+        if best_action is None:
+            best_action = WizardMoves.STAY
 
-        # Update belief after choosing this action
-        self.update_prior(action)
+        # Update belief based on the movement we are about to take
+        self.update_prior(best_action)
 
-        return action
+        return best_action
