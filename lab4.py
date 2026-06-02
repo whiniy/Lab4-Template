@@ -82,86 +82,77 @@ class LocationValues:
         Perform one update of value iteration based off of the provided MDP.
         """
 
-        # create new grid with row and column sizes
-        next_value_grid = [[0.0 for _ in range(self.mdp.game_state.grid_size[1])] for _ in range(self.mdp.game_state.grid_size[0])]
+        rows = self.mdp.game_state.grid_size[0]
+        cols = self.mdp.game_state.grid_size[1]
 
-        # every location in the map
-        for row in range(self.mdp.game_state.grid_size[0]):
-            for col in range(self.mdp.game_state.grid_size[1]):
+        # Fix value_grid size for non-square maps like cliff
+        if len(self.value_grid) != rows or len(self.value_grid[0]) != cols:
+            self.value_grid = [[0.0 for _ in range(cols)] for _ in range(rows)]
 
-                # current location we are calculating value for
+        # New grid for updated values
+        next_value_grid = [[0.0 for _ in range(cols)] for _ in range(rows)]
+
+        # Go through every location
+        for row in range(rows):
+            for col in range(cols):
                 location = Location(row, col)
 
-                # wizard is at this location
+                # Create a state with the wizard at this location
                 source_state = self.mdp.game_state.replace_active_entity_location(location)
 
-                # all possible successors from this location
+                # Get actual successor states, including victory/defeat info
                 successors = GameTransitions.get_successors(source_state)
 
-                # if there are no successors, then terminal
+                # If no successors, leave value as 0
                 if len(successors) == 0:
                     next_value_grid[row][col] = 0
                     continue
 
-                # all valid actions from this location
                 actions = [a for a, _ in successors]
-
-                # values for each possible action
                 action_values = []
 
-                # try every possible wizard action
+                # Try each possible action
                 for action in WizardMoves:
 
-                    # if the action is invalid from this location, treat it like STAY
+                    # If action is invalid, transition_model treats it like STAY
                     action_to_use = action
                     if action not in actions:
                         action_to_use = WizardMoves.STAY
 
+                    # Matches transition_model weighting
                     total_weight = 2 * len(actions)
-
-                    # expected value of choosing this action
                     expected_value = 0
 
-                    # go through each possible successor state
                     for successor_action, successor_state in successors:
 
-                        # desired action has extra weight
+                        # Intended action gets extra probability weight
                         if successor_action == action_to_use:
                             weight = len(actions) + 1
                         else:
                             weight = 1
 
-                        # weight to probability
                         probability = weight / total_weight
 
-                        # if this successor is death, use death reward and no future value
+                        # IMPORTANT: handle terminal states directly
                         if successor_state.defeat:
                             reward = self.mdp.death_reward
                             future_value = 0
-
-                        # if this successor is victory, use escape reward and no future value
                         elif successor_state.victory:
                             reward = self.mdp.escape_reward
                             future_value = 0
-
-                        # use living reward and future location value
                         else:
                             reward = self.mdp.living_reward
                             next_loc = successor_state.active_entity_location
                             future_value = self.value_grid[next_loc.row][next_loc.col]
 
-                        # bellman update
                         expected_value += probability * (
                             reward + self.mdp.discount * future_value
                         )
 
-                    # save this expected value
                     action_values.append(expected_value)
 
-                # best action value becomes location's new value
                 next_value_grid[row][col] = max(action_values)
 
-        # save updated grid
         self.value_grid = next_value_grid
         return next_value_grid
 
@@ -229,9 +220,6 @@ class MDPAgent(UncertainAgent):
         Our uncertain agent only has noisy observations to guess where in the dungeon it is. Use the previously implemented parts to generate an estimate for the distribution of possible locations the wizard might be at, updating every turn with a new observation, and choose the action based off of your value iteration policy based on your estimate.
         """
 
-        # Use Bayes Rule to update your beliefs about where you think the wizard is based off of the observation
-        self.update_belief(observation)
-
 
         # Part 2: Choose the best action
         # use your calculated value iteration map of location values alongside your estimated location to choose the best action given your uncertain state.
@@ -243,54 +231,68 @@ class MDPAgent(UncertainAgent):
             # 5. You can calculate the reward of a specific transition as a result of a specific action with a specific result
             # 6. You have an estimate of the value of each result location
         
-        # track best action and best value found
-        best_action = None
-        best_value = float('-inf')
-        
-        # try every possible action
-        for action in WizardMoves:
+        # Update belief based on noisy observation
+        self.update_belief(observation)
 
-            # expected value for this action
+        best_action = None
+        best_value = float("-inf")
+
+        # Try every action
+        for action in WizardMoves:
             expected_value = 0
 
-            # go through every location the wizard might be at
+            # Consider every location the wizard might be at
             for curr_loc in self.current_position_estimate.locations():
-
-                # probability that wizard is currently at this location
                 current_prob = self.current_position_estimate.probability(curr_loc)
 
-                # possible next locations after taking this action
-                result_distribution = self.mdp.transition_model(curr_loc, action)
+                source_state = self.mdp.game_state.replace_active_entity_location(curr_loc)
+                successors = GameTransitions.get_successors(source_state)
 
-                # go through possible next locations
-                for next_loc in result_distribution.locations():
+                if len(successors) == 0:
+                    continue
 
-                    # probability of ending up at location
-                    next_prob = result_distribution.probability(next_loc)
+                actions = [a for a, _ in successors]
 
-                    # source and target game states for reward calculation
-                    source_state = self.mdp.game_state.replace_active_entity_location(curr_loc)
-                    target_state = self.mdp.game_state.replace_active_entity_location(next_loc)
+                # If action is invalid, transition_model treats it like STAY
+                action_to_use = action
+                if action not in actions:
+                    action_to_use = WizardMoves.STAY
 
-                    # immediate reward for this transition
-                    reward = self.mdp.reward(source_state, target_state, action)
+                # Same probability logic as transition_model
+                total_weight = 2 * len(actions)
 
-                    # future value of next location
-                    future_value = self.values.value_grid[next_loc.row][next_loc.col]
+                for successor_action, successor_state in successors:
 
-                    # add weighted expected value
+                    if successor_action == action_to_use:
+                        weight = len(actions) + 1
+                    else:
+                        weight = 1
+
+                    next_prob = weight / total_weight
+
+                    # IMPORTANT: handle lava/portal directly
+                    if successor_state.defeat:
+                        reward = self.mdp.death_reward
+                        future_value = 0
+                    elif successor_state.victory:
+                        reward = self.mdp.escape_reward
+                        future_value = 0
+                    else:
+                        reward = self.mdp.living_reward
+                        next_loc = successor_state.active_entity_location
+                        future_value = self.values.value_grid[next_loc.row][next_loc.col]
+
                     expected_value += current_prob * next_prob * (
                         reward + self.mdp.discount * future_value
                     )
 
-            # save action if it is the best one so far
             if expected_value > best_value:
                 best_value = expected_value
                 best_action = action
 
-        # choose the best action
         action = best_action
 
-        # update belief to account for the movement we are about to take
+        # Update belief after choosing this action
         self.update_prior(action)
+
         return action
