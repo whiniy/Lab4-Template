@@ -51,9 +51,21 @@ class MDP:
         Given a location distribution, calculate the new distribution that is a result of taking the given action.
         The easiest way to do this will involve sampling.
         """
-
-        #TODO YOUR CODE HERE
-        raise NotImplementedError()
+        # create empty counter for locations
+        location_counts = LocationCounts(self.game_state.grid_size)
+        # repeat sampling for 1000 iterations 
+        for _ in range(1000):
+            # get possible location from source distribution
+            current_location = source.sample()
+            # use transition_model to see where wizard could end up if it takes the action 
+            transition_distribution = self.transition_model(current_location, action)
+            # sample new location from transition model
+            new_location = transition_distribution.sample()
+            # add count to new location in location counts
+            location_counts.add_count(new_location)
+        
+        # convert location counts to distribution and return
+        return location_counts.normalize()
 
 
 class LocationValues:
@@ -69,13 +81,34 @@ class LocationValues:
         """
         Perform one update of value iteration based off of the provided MDP.
         """
-
+        # new grid to store new values until the update is complete
         next_value_grid = [[0.0 for _ in range(self.mdp.game_state.grid_size[1])] for _ in range(self.mdp.game_state.grid_size[1])]
+        
+        # iterate through all locations in the grid
+        for row in range(self.mdp.game_state.grid_size[0]):
+            for col in range(self.mdp.game_state.grid_size[1]):
+                location = Location(row, col)
+                
+                # calculate value of each action at this location
+                action_values = []
+                for action in WizardMoves:
+                    # get transition distribution for this action
+                    transition_ditribution = self.mdp.transition_model(location, action)
+                    # calculate expected value of this action
+                    expected_value = 0
+                    for next_location in transition_ditribution.locations():
+                        # calculate reward for this transition
+                        reward = self.mdp.reward(self.mdp.game_state.replace_active_entity_location(location), self.mdp.game_state.replace_active_entity_location(next_location), action)
+                        # add discounted value of next location
+                        expected_value += transition_ditribution.probability(next_location) * (reward + self.mdp.discount * self.value_grid[next_location.row][next_location.col])
+                    action_values.append(expected_value)
 
+                # update the value of this location to the maximum expected value of any action
+                next_value_grid[row][col] = max(action_values)
 
-        #TODO YOUR CODE HERE, CALCULATE NEXT VALUE AS A FUNCTION OF PREVIOUS VALUE
-        raise NotImplementedError()
-
+        # save updated grid for future iterations and react()
+        self.value_grid = next_value_grid
+        
         return next_value_grid
 
 
@@ -116,12 +149,25 @@ class MDPAgent(UncertainAgent):
         new_estimate = LocationDistribution.from_game_state_uniform(self.mdp.game_state)
 
         #The new distribution should be set for each location
+        # P(Loc | Obs) = P(Obs | Loc) * P(Loc)
         for loc in new_estimate.locations():
+            # get old probability that wizard is at this location before using the new observation
+            prior = self.current_position_estimate.probability(loc)
+            
+            # get likelihood of the observation given that the wizard is at this location
+            likelihood = self.observation_likelihood(observation, loc)
+            
+            # Bayes' rule
+            # new belief is proportional to old belief times likelihood of the observation
+            new_prob = likelihood * prior
+            
+            # store the updated probability for this location in the new distribution
+            new_estimate.set_probability(loc, new_prob)
 
-            #TODO: YOUR CODE HERE
-            raise NotImplementedError()
-
+        # normalize the new distribution so that it sums to 1
         new_estimate.renormalize()
+        
+        # replace old belief with new belief
         self.current_position_estimate = new_estimate
 
     def react(self, observation: Observation) -> GameAction:
@@ -142,10 +188,55 @@ class MDPAgent(UncertainAgent):
             # 4. You can find the distribution of the results of an action for a given specific location
             # 5. You can calculate the reward of a specific transition as a result of a specific action with a specific result
             # 6. You have an estimate of the value of each result location
-        #TODO YOUR CODE HERE
-        raise NotImplementedError()
-        action = WizardMoves.RIGHT
+        
+        # track best action and best value found
+        best_action = None
+        best_value = float('-inf')
+        
+        # try every possible action
+        for action in WizardMoves:
 
-        #When choosing an action, we must update our prior to account for the new distribution as a result of the action being taken
+            # expected value for this action
+            expected_value = 0
+
+            # go through every location the wizard might be at
+            for curr_loc in self.current_position_estimate.locations():
+
+                # probability that wizard is currently at this location
+                current_prob = self.current_position_estimate.probability(curr_loc)
+
+                # possible next locations after taking this action
+                result_distribution = self.mdp.transition_model(curr_loc, action)
+
+                # go through possible next locations
+                for next_loc in result_distribution.locations():
+
+                    # probability of ending up at location
+                    next_prob = result_distribution.probability(next_loc)
+
+                    # source and target game states for reward calculation
+                    source_state = self.mdp.game_state.replace_active_entity_location(curr_loc)
+                    target_state = self.mdp.game_state.replace_active_entity_location(next_loc)
+
+                    # immediate reward for this transition
+                    reward = self.mdp.reward(source_state, target_state, action)
+
+                    # future value of next location
+                    future_value = self.values.value_grid[next_loc.row][next_loc.col]
+
+                    # add weighted expected value
+                    expected_value += current_prob * next_prob * (
+                        reward + self.mdp.discount * future_value
+                    )
+
+            # save action if it is the best one so far
+            if expected_value > best_value:
+                best_value = expected_value
+                best_action = action
+
+        # choose the best action
+        action = best_action
+
+        # update belief to account for the movement we are about to take
         self.update_prior(action)
         return action
